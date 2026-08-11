@@ -1,1 +1,1 @@
-# Paper-trade-bot
+# paper-trade-bot
