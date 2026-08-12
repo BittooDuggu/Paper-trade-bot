@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Paper Trade Bot V5</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f5f5f7;color:#111827}
+main{max-width:680px;margin:auto;padding:18px 14px 40px}
+.card{background:#fff;border-radius:18px;padding:18px;margin:12px 0;box-shadow:0 2px 10px #0001}
+h1{font-size:28px;margin:8px 0 18px}
+h3{font-size:22px;margin:0 0 18px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+label{font-size:14px;color:#666;display:block;margin-bottom:6px}
+input{width:100%;box-sizing:border-box;padding:13px;border:1px solid #ddd;border-radius:12px;font-size:17px;background:#fff}
+input:disabled{background:#f7f7f7;color:#888}
+button{padding:13px 17px;border:0;border-radius:13px;font-weight:700;font-size:17px}
+.start{background:#16a34a;color:#fff}.stop{background:#dc2626;color:#fff}.blue{background:#2563eb;color:#fff}
+.gray{background:#e5e7eb;color:#2563eb}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.muted{color:#666;line-height:1.4}.levels{font-size:14px;color:#444;margin-top:7px}
+.trade{border-top:1px solid #eee;padding:12px 0;line-height:1.4}
+.note{background:#eef3ff;color:#174a9c;border-radius:12px;padding:13px;line-height:1.45}
+.calc{background:#f7f7f7;border-radius:12px;padding:12px;margin-top:12px;line-height:1.5}
+.status{font-size:20px}
+.small{font-size:13px;color:#666}
+@media(max-width:520px){.grid{gap:9px}h1{font-size:26px}}
+</style>
+</head>
+<body>
+<main>
+<h1>📈 Paper Trade Bot V5</h1>
+
+<div class="card">
+  <div class="row">
+    <span id="dot" style="font-size:22px">⚪</span>
+    <b id="status" class="status">STOPPED — PAPER ONLY</b>
+    <button id="toggle" class="start" type="button">START</button>
+  </div>
+  <p>Direction: <b id="dir">BUY</b> · Quantity: <b id="qtyView">1</b></p>
+</div>
+
+<div class="card">
+<h3>Strategy Settings</h3>
+<div class="grid">
+  <div><label>Market</label><input id="market" value="NSE"></div>
+  <div><label>Symbol</label><input id="symbol" value="NIFTY"></div>
+  <div><label>Starting Quantity</label><input id="qty" type="number" min="0.000000000001" step="any" value="1"></div>
+  <div><label>Target Points</label><input id="target" type="number" min="0.000000000001" step="any" value="500"></div>
+  <div><label>Stop Loss Points</label><input id="sl" type="number" min="0.000000000001" step="any" value="250"></div>
+  <div><label>Recovery Points</label><input id="recovery" type="number" min="0.000000000001" step="any" value="400"></div>
+</div>
+
+<div class="note" style="margin-top:14px">
+Target, Recovery Points and Stop Loss are fixed for the current bot run.
+Change them after STOP and they will apply on the next START.
+</div>
+
+<div class="calc">
+<b>Recovery formula after STOP LOSS</b><br>
+Actual loss = Previous Quantity × Stop Loss Points<br>
+Recovery quantity = Actual loss ÷ Recovery Points<br>
+Recovery quantity is rounded <b>UP</b> to the decimal precision of Starting Quantity.<br>
+Next Quantity = Previous Quantity + Recovery Quantity.
+</div>
+
+<div id="preview" class="small" style="margin-top:10px"></div>
+</div>
+
+<div class="card">
+<h3>Paper Price</h3>
+<label>Current Price</label>
+<input id="price" type="number" step="any" placeholder="Enter price">
+<div class="row" style="margin-top:10px">
+  <button id="openBtn" class="blue" type="button">Open Current Signal</button>
+  <button id="checkBtn" class="gray" type="button">Update Price / Check</button>
+</div>
+<div id="open" class="muted" style="margin-top:10px">No open trade.</div>
+</div>
+
+<div class="card">
+<h3>Trade Journal</h3>
+<div id="journal" class="muted">No completed trades.</div>
+<div class="row" style="margin-top:10px">
+<button id="exportBtn" class="blue" type="button">Export CSV</button>
+<button id="clearBtn" class="gray" type="button">Clear History</button>
+</div>
+</div>
+</main>
+
+<script>
+'use strict';
+
+const KEY='paperTradeBotV5_fixed_20260812';
+const $=id=>document.getElementById(id);
+const val=id=>Number($(id).value);
+
+let state={
+  running:false,
+  dir:'BUY',
+  qty:1,
+  precision:0,
+  target:500,
+  sl:250,
+  recovery:400,
+  market:'NSE',
+  symbol:'NIFTY',
+  open:null,
+  trades:[]
+};
+
+try{
+  const saved=JSON.parse(localStorage.getItem(KEY)||'null');
+  if(saved && typeof saved==='object') state={...state,...saved};
+}catch(e){}
+
+function fmt(n){
+  if(!Number.isFinite(Number(n))) return '0';
+  return Number(n).toFixed(12).replace(/0+$/,'').replace(/\.$/,'') || '0';
+}
+
+function precisionOf(q){
+  const s=String(q).trim();
+  if(!s) return 0;
+  if(/[eE]-/.test(s)){
+    const parts=s.toLowerCase().split('e-');
+    return Math.min(12,Number(parts[1])||0);
+  }
+  return Math.min(12,(s.split('.')[1]||'').length);
+}
+
+function unit(){
+  return Math.pow(10,-state.precision);
+}
+
+function roundUp(q){
+  const u=unit();
+  return Number((Math.ceil((q/u)-1e-10)*u).toFixed(state.precision));
+}
+
+function save(){
+  localStorage.setItem(KEY,JSON.stringify(state));
+  render();
+}
+
+function syncInputs(){
+  $('market').value=state.market;
+  $('symbol').value=state.symbol;
+  $('qty').value=fmt(state.qty);
+  $('target').value=fmt(state.target);
+  $('sl').value=fmt(state.sl);
+  $('recovery').value=fmt(state.recovery);
+}
+
+function render(){
+  $('status').textContent=state.running?'RUNNING — PAPER ONLY':'STOPPED — PAPER ONLY';
+  $('dot').textContent=state.running?'🟢':'⚪';
+  $('toggle').textContent=state.running?'STOP':'START';
+  $('toggle').className=state.running?'stop':'start';
+  $('dir').textContent=state.dir;
+  $('qtyView').textContent=fmt(state.qty);
+
+  ['market','symbol','qty','target','sl','recovery'].forEach(id=>{
+    $(id).disabled=state.running;
+  });
+
+  if(state.open){
+    const t=state.open;
+    $('open').innerHTML=
+      '<b>'+t.direction+' '+fmt(t.quantity)+' @ '+fmt(t.entry)+'</b>'+
+      '<div class="levels">Target: '+fmt(t.targetPrice)+' | Stop Loss: '+fmt(t.stopLossPrice)+'</div>';
+  }else{
+    $('open').textContent='No open trade.';
+  }
+
+  if(!state.trades.length){
+    $('journal').innerHTML='No completed trades.';
+  }else{
+    $('journal').innerHTML=state.trades.slice().reverse().map(t=>
+      '<div class="trade">'+
+      '<b>'+t.direction+' '+fmt(t.quantity)+' — '+t.reason+'</b><br>'+
+      'Entry '+fmt(t.entry)+' → Exit '+fmt(t.exit)+' · P/L '+fmt(t.pnl)+' points'+
+      '<div class="levels">SL '+fmt(t.sl)+' · Recovery '+fmt(t.recovery)+
+      ' · Recovery qty '+fmt(t.recoveryQuantity)+' · Next qty '+fmt(t.nextQuantity)+'</div>'+
+      '<small>'+new Date(t.time).toLocaleString()+'</small>'+
+      '</div>'
+    ).join('');
+  }
+
+  updatePreview();
+}
+
+function updatePreview(){
+  const q=Number($('qty').value);
+  const sl=Number($('sl').value);
+  const rec=Number($('recovery').value);
+  if(q>0 && sl>0 && rec>0){
+    const p=precisionOf(q);
+    const u=Math.pow(10,-p);
+    const loss=q*sl;
+    const raw=loss/rec;
+    const rq=Number((Math.ceil((raw/u)-1e-10)*u).toFixed(p));
+    const next=Number((q+rq).toFixed(p));
+    $('preview').innerHTML=
+      'Example if this quantity hits SL: Loss = '+fmt(loss)+
+      ' · Recovery qty = '+fmt(rq)+' · Next qty = <b>'+fmt(next)+'</b>';
+  }else{
+    $('preview').textContent='';
+  }
+}
+
+['qty','sl','recovery'].forEach(id=>$(id).addEventListener('input',updatePreview));
+
+$('toggle').addEventListener('click',()=>{
+  if(state.running){
+    state.running=false;
+    state.open=null;
+    state.dir='BUY';
+    save();
+    return;
+  }
+
+  const q=Number($('qty').value);
+  const target=Number($('target').value);
+  const sl=Number($('sl').value);
+  const recovery=Number($('recovery').value);
+
+  if(!(q>0 && target>0 && sl>0 && recovery>0)){
+    alert('Please enter valid positive Starting Quantity, Target, Stop Loss and Recovery Points.');
+    return;
+  }
+
+  state.running=true;
+  state.dir='BUY';
+  state.qty=q;
+  state.precision=precisionOf(q);
+  state.target=target;
+  state.sl=sl;
+  state.recovery=recovery;
+  state.market=$('market').value.trim()||'NSE';
+  state.symbol=$('symbol').value.trim()||'SYMBOL';
+  state.open=null;
+  save();
+});
+
+$('openBtn').addEventListener('click',()=>{
+  if(!state.running){alert('Start the bot first.');return;}
+  if(state.open){alert('A trade is already open.');return;}
+
+  const p=Number($('price').value);
+  if(!(p>0)){alert('Enter a valid current price.');return;}
+
+  state.open={
+    direction:state.dir,
+    quantity:state.qty,
+    entry:p,
+    targetPrice:state.dir==='BUY'?p+state.target:p-state.target,
+    stopLossPrice:state.dir==='BUY'?p-state.sl:p+state.sl,
+    sl:state.sl,
+    recovery:state.recovery,
+    market:state.market,
+    symbol:state.symbol,
+    time:Date.now()
+  };
+  save();
+});
+
+$('checkBtn').addEventListener('click',()=>{
+  if(!state.running || !state.open){
+    alert('No open paper trade.');
+    return;
+  }
+
+  const p=Number($('price').value);
+  if(!(p>0)){alert('Enter a valid current price.');return;}
+
+  const t=state.open;
+  let reason=null;
+
+  if(t.direction==='BUY'){
+    if(p<=t.stopLossPrice) reason='STOP LOSS';
+    else if(p>=t.targetPrice) reason='TARGET';
+  }else{
+    if(p>=t.stopLossPrice) reason='STOP LOSS';
+    else if(p<=t.targetPrice) reason='TARGET';
+  }
+
+  if(!reason){
+    alert('No exit yet. Target: '+fmt(t.targetPrice)+' | Stop Loss: '+fmt(t.stopLossPrice));
+    return;
+  }
+
+  const pricePoints=t.direction==='BUY'?(p-t.entry):(t.entry-p);
+  const pnl=pricePoints*t.quantity;
+
+  let recoveryQuantity=0;
+  let nextQuantity=t.quantity;
+
+  if(reason==='STOP LOSS'){
+    // USER REQUESTED FORMULA:
+    // loss = previous quantity × SL
+    // recovery call quantity = loss ÷ recovery points
+    // round UP so recovery call can recover at least the loss
+    // next call = previous quantity + recovery call quantity
+    const actualLoss=Math.abs(t.quantity*t.sl);
+    const rawRecoveryQuantity=actualLoss/t.recovery;
+    recoveryQuantity=roundUp(rawRecoveryQuantity);
+    nextQuantity=Number((t.quantity+recoveryQuantity).toFixed(state.precision));
+  }
+
+  state.trades.push({
+    time:Date.now(),
+    market:t.market,
+    symbol:t.symbol,
+    direction:t.direction,
+    quantity:t.quantity,
+    entry:t.entry,
+    exit:p,
+    sl:t.sl,
+    recovery:t.recovery,
+    reason:reason,
+    pnl:pnl,
+    recoveryQuantity:recoveryQuantity,
+    nextQuantity:nextQuantity
+  });
+
+  state.qty=nextQuantity;
+  state.dir=t.direction==='BUY'?'SELL':'BUY';
+  state.open=null;
+  save();
+});
+
+$('clearBtn').addEventListener('click',()=>{
+  if(confirm('Delete all paper trade history?')){
+    state.trades=[];
+    state.open=null;
+    save();
+  }
+});
+
+$('exportBtn').addEventListener('click',()=>{
+  const cols=['timestamp','market','symbol','direction','quantity','entry','exit','sl','recovery','reason','pnl','recoveryQuantity','nextQuantity'];
+  const rows=[cols.join(',')];
+
+  state.trades.forEach(t=>{
+    rows.push(cols.map(k=>{
+      let v=k==='timestamp'?new Date(t.time).toISOString():t[k];
+      return '"'+String(v??'').replaceAll('"','""')+'"';
+    }).join(','));
+  });
+
+  const blob=new Blob([rows.join('\\n')],{type:'text/csv;charset=utf-8'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='paper_trade_journal.csv';
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+});
+
+syncInputs();
+render();
+</script>
+</body>
+</html>
