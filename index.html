@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#2563eb">
-<title>Trading Bot V11 — Backtest</title>
+<title>Trading Bot V13 — Backtest</title>
 <style>
 *{box-sizing:border-box}
 body{margin:0;background:#f4f5f7;color:#101828;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
@@ -32,11 +32,11 @@ button.green{background:#16a34a} button.red{background:#dc2626} button.gray{back
 .hidden{display:none}
 @media(max-width:520px){.grid{gap:9px}.title{font-size:27px}.card{padding:16px}.statgrid{grid-template-columns:1fr 1fr}}
 </style>
-<meta name="version" content="V11-RECOVERY-FINAL">
+<meta name="version" content="V13-QUANTITY-ENGINE-LOCKED">
 </head>
 <body>
 <main class="wrap">
-<div class="title">📈 Trading Bot V11</div>
+<div class="title">📈 Trading Bot V13</div>
 
 <div class="card">
   <h2>Strategy Settings</h2>
@@ -52,7 +52,7 @@ button.green{background:#16a34a} button.red{background:#dc2626} button.gray{back
     <b>Strategy logic:</b><br>
     Start with the Starting Quantity and BUY. After TARGET: the trade closes, direction flips, and the NEXT call quantity is reset to Starting Quantity.
     After STOP LOSS: direction flips. Actual loss = previous quantity × SL. Recovery quantity = actual loss ÷ Recovery Points, rounded UP to the Starting Quantity decimal precision. That recovery quantity is added to the previous quantity for the NEXT call. Example: 0.01 × 250 = 2.5; 2.5 ÷ 400 = 0.00625 → 0.01; next quantity = 0.02.
-    A call is never created with zero quantity.
+    A call is never created with zero quantity. The same quantity-transition engine is used for every trade and the backtest runs a quantity-chain audit before showing PASS.
   </div>
 </div>
 
@@ -161,22 +161,52 @@ function calculateRecovery(previousQty, slPoints, recoveryPoints, precision){
   const previous = Number(previousQty);
   const sl = Number(slPoints);
   const recoveryMove = Number(recoveryPoints);
-  if(!(previous>0 && sl>0 && recoveryMove>0 && Number.isInteger(precision) && precision>=0)) throw new Error('Invalid recovery inputs.');
+  if(!(previous>0 && sl>0 && recoveryMove>0 && Number.isInteger(precision) && precision>=0)){
+    throw new Error('Invalid recovery inputs.');
+  }
 
-  // EXACT STRATEGY RULE:
-  // actual loss = previous quantity × SL points
-  // recovery quantity = actual loss ÷ recovery points
-  // round UP to Starting Quantity precision
-  // next quantity = previous quantity + recovery quantity
+  // LOCKED RULE — do not mix this with candle prices:
+  // 1) SL loss amount = previous quantity × configured SL points
+  // 2) recovery quantity = loss amount ÷ configured Recovery Points
+  // 3) round recovery quantity UP to the precision of Starting Quantity
+  // 4) next quantity = previous quantity + recovery quantity
   const actualLoss = previous * sl;
   const rawRecoveryQty = actualLoss / recoveryMove;
+  const recoveryQty = roundUpQty(rawRecoveryQty, precision);
+  const nextQty = roundQty(previous + recoveryQty, precision);
 
-  const unit = Math.pow(10, -precision);
-  const recoveryUnits = Math.max(1, Math.ceil((rawRecoveryQty / unit) - 1e-12));
-  const recoveryQty = Number((recoveryUnits * unit).toFixed(precision));
-  const nextQty = Number((previous + recoveryQty).toFixed(precision));
-
+  if(!(recoveryQty>0 && nextQty>previous)) throw new Error('Recovery engine produced an invalid next quantity.');
   return {actualLoss, rawRecoveryQty, recoveryQty, nextQty};
+}
+
+// ONE state-transition function is used by the backtester for every completed trade.
+// This prevents target resets, stop-loss recovery, and direction changes from drifting apart.
+function nextStateAfterExit(trade, cfg){
+  const nextDirection = trade.direction==='BUY' ? 'SELL' : 'BUY';
+  if(trade.reason==='TARGET'){
+    return {direction:nextDirection, quantity:cfg.q, recoveryQty:0, actualLoss:0, rawRecovery:0, rule:'TARGET_RESET'};
+  }
+  if(trade.reason==='STOP LOSS'){
+    const c=calculateRecovery(trade.quantity,cfg.sl,cfg.recovery,cfg.precision);
+    return {direction:nextDirection, quantity:c.nextQty, recoveryQty:c.recoveryQty, actualLoss:c.actualLoss, rawRecovery:c.rawRecoveryQty, rule:'STOP_RECOVERY'};
+  }
+  throw new Error('Unknown exit reason.');
+}
+
+function auditQuantityChain(trades,cfg){
+  const errors=[];
+  for(let i=0;i<trades.length;i++){
+    const t=trades[i];
+    const expectedDirection=t.direction==='BUY'?'SELL':'BUY';
+    if(i+1<trades.length){
+      const n=trades[i+1];
+      if(n.direction!==expectedDirection) errors.push('#'+t.no+' direction → #'+n.no);
+      const expectedQty=t.reason==='TARGET' ? cfg.q : calculateRecovery(t.quantity,cfg.sl,cfg.recovery,cfg.precision).nextQty;
+      if(Math.abs(n.quantity-expectedQty)>Math.pow(10,-cfg.precision)/2) errors.push('#'+t.no+' qty '+fmt(n.quantity)+' expected '+fmt(expectedQty));
+    }
+    if(!(t.quantity>0)) errors.push('#'+t.no+' zero/negative quantity');
+  }
+  return errors;
 }
 function epochSeconds(date,time){
   return Math.floor(new Date(date+'T'+time+':00').getTime()/1000);
@@ -255,92 +285,59 @@ function tradeExit(trade, candle, bothRule){
 
 function runEngine(candles,cfg){
   const trades=[];
-  let direction=cfg.firstDir;
-  let qty=cfg.q;
+  let state={direction:cfg.firstDir, quantity:cfg.q};
   let net=0, peak=0, maxDD=0;
   let i=0;
 
-  // Each loop represents exactly one call. It enters at the OPEN of the current candle,
-  // then scans forward until that call hits its target or stop loss. The next call begins
-  // on the candle AFTER the exit candle. This prevents accidental same-candle re-entry.
   while(i<candles.length){
     const entryCandle=candles[i];
-    if(!Number.isFinite(entryCandle.open)) { i++; continue; }
+    if(!Number.isFinite(entryCandle.open)){i++;continue;}
 
-    // Safety: quantity must always be a positive number and must never become zero.
-    qty=roundUpQty(Math.max(cfg.q,qty),cfg.precision);
-    if(!(qty>0)) qty=cfg.q;
+    const qty=roundQty(state.quantity,cfg.precision);
+    if(!(qty>0)) throw new Error('Internal error: next call quantity is zero.');
 
-    const entry=entryCandle.open;
     const trade={
       no:trades.length+1,
-      direction,
+      direction:state.direction,
       quantity:qty,
-      entry,
-      targetPrice:direction==='BUY'?entry+cfg.target:entry-cfg.target,
-      slPrice:direction==='BUY'?entry-cfg.sl:entry+cfg.sl,
+      entry:entryCandle.open,
+      targetPrice:state.direction==='BUY'?entryCandle.open+cfg.target:entryCandle.open-cfg.target,
+      slPrice:state.direction==='BUY'?entryCandle.open-cfg.sl:entryCandle.open+cfg.sl,
       entryTime:entryCandle.time
     };
 
     let exit=null, exitIndex=-1;
     for(let j=i;j<candles.length;j++){
       exit=tradeExit(trade,candles[j],cfg.bothRule);
-      if(exit){ exitIndex=j; break; }
+      if(exit){exitIndex=j;break;}
     }
-
-    // An unfinished final call is not counted as a completed trade.
     if(!exit) break;
 
     const exitCandle=candles[exitIndex];
     const points=trade.direction==='BUY'?exit.price-trade.entry:trade.entry-exit.price;
     const pnl=points*trade.quantity;
-
-    let recoveryQty=0;
-    let nextQty;
-    if(exit.reason==='STOP LOSS'){
-      const calc = calculateRecovery(
-        trade.quantity,
-        cfg.sl,
-        cfg.recovery,
-        cfg.precision
-      );
-      recoveryQty = calc.recoveryQty;
-      nextQty = calc.nextQty;
-    }else{
-      // TARGET: reset BEFORE creating the next call.
-      nextQty=cfg.q;
-    }
-    if(!(nextQty>0)) nextQty=cfg.q;
+    const transition=nextStateAfterExit({...trade,reason:exit.reason},cfg);
 
     net+=pnl;
     peak=Math.max(peak,net);
     maxDD=Math.max(maxDD,peak-net);
 
     trades.push({
-      no:trade.no,
-      time:trade.entryTime,
-      exitTime:exitCandle.time,
-      direction:trade.direction,
-      quantity:trade.quantity,
-      entry:trade.entry,
-      exit:exit.price,
-      target:trade.targetPrice,
-      sl:trade.slPrice,
-      reason:exit.reason,
-      bothHit:!!exit.bothHit,
-      points,
-      pnl,
-      actualLoss:exit.reason==='STOP LOSS'?trade.quantity*cfg.sl:0,
-      rawRecovery:exit.reason==='STOP LOSS'?(trade.quantity*cfg.sl)/cfg.recovery:0,
-      recoveryQty,
-      nextQty
+      no:trade.no,time:trade.entryTime,exitTime:exitCandle.time,
+      direction:trade.direction,quantity:trade.quantity,entry:trade.entry,exit:exit.price,
+      target:trade.targetPrice,sl:trade.slPrice,reason:exit.reason,bothHit:!!exit.bothHit,
+      points,pnl,actualLoss:transition.actualLoss,rawRecovery:transition.rawRecovery,
+      recoveryQty:transition.recoveryQty,nextQty:transition.quantity,nextDirection:transition.direction,
+      transitionRule:transition.rule
     });
 
-    direction=trade.direction==='BUY'?'SELL':'BUY';
-    qty=nextQty;
+    state={direction:transition.direction,quantity:transition.quantity};
     i=exitIndex+1;
   }
-  return {trades,net,maxDD,endingQuantity:qty,endingDirection:direction};
+
+  const auditErrors=auditQuantityChain(trades,cfg);
+  if(auditErrors.length) throw new Error('Quantity-chain audit failed: '+auditErrors.join(', '));
+  return {trades,net,maxDD,endingQuantity:state.quantity,endingDirection:state.direction};
 }
 function renderResult(out,cfg,candleCount){
   backtestTrades=out.trades;
@@ -362,7 +359,7 @@ function renderResult(out,cfg,candleCount){
     '<br>First call: '+cfg.firstDir+' '+fmt(cfg.q)+
     '<br>After TARGET → opposite direction + <b>Starting Quantity reset</b>.'+
     '<br>After STOP LOSS → opposite direction + <b>previous quantity + recovery quantity</b>.'+
-    '<br>Both-hit rule: '+(cfg.bothRule==='TARGET_FIRST'?'TARGET first':'STOP LOSS first')+' · Ending qty: '+fmt(out.endingQuantity)+' · Ending direction: '+out.endingDirection;
+    '<br>Both-hit rule: '+(cfg.bothRule==='TARGET_FIRST'?'TARGET first':'STOP LOSS first')+' · Ending qty: '+fmt(out.endingQuantity)+' · Ending direction: '+out.endingDirection+'<br><b>Quantity-chain audit: PASS</b>';
   renderJournal();
 }
 function renderJournal(){
@@ -371,9 +368,8 @@ function renderJournal(){
     '<div class="trade"><b>#'+t.no+' '+t.direction+' '+fmt(t.quantity)+' — '+t.reason+'</b><br>'+
     'Entry '+fmt(t.entry)+' → Exit '+fmt(t.exit)+' · P/L '+fmt(t.pnl)+' points'+
     '<div class="muted">Target '+fmt(t.target)+' · SL '+fmt(t.sl)+
-    ' · Loss '+fmt(t.actualLoss)+' · Loss ÷ Recovery '+fmt(t.rawRecovery)+' · <b>Recovery qty '+fmt(t.recoveryQty)+' · Next qty '+fmt(t.nextQty)+'</b>'+
-    (t.reason==='STOP LOSS'?' · Loss '+fmt(t.actualLoss)+' ÷ Recovery '+fmt(t.rawRecovery):' · Quantity reset to Starting Quantity')+
-    (t.bothHit?' · Both levels touched':'')+'</div>'+
+    ' · '+(t.reason==='STOP LOSS' ? ('Loss '+fmt(t.actualLoss)+' ÷ Recovery '+fmt(t.rawRecovery)+' → Recovery qty <b>'+fmt(t.recoveryQty)+'</b> → Next qty <b>'+fmt(t.nextQty)+'</b>') : ('<b>Next qty reset to '+fmt(t.nextQty)+'</b>'))+
+    ' · Next direction <b>'+t.nextDirection+'</b>'+(t.bothHit?' · Both levels touched':'')+'</div>'+
     '<small>'+new Date(t.time*1000).toLocaleString()+' → '+new Date(t.exitTime*1000).toLocaleString()+'</small></div>'
   ).join('');
 }
@@ -415,17 +411,16 @@ async function runBacktest(){
 }
 
 $('formulaTest').addEventListener('click',()=>{
-  const q=Number($('qty').value);
-  const sl=Number($('sl').value);
-  const rec=Number($('recovery').value);
-  const precision=qtyPrecision($('qty').value);
-  const c=calculateRecovery(q,sl,rec,precision);
-  setProgress(100,
-    'TEST RESULT → Loss '+fmt(c.actualLoss)+
-    ' | Loss ÷ Recovery '+fmt(c.rawRecoveryQty)+
-    ' | Recovery Qty '+fmt(c.recoveryQty)+
-    ' | NEXT Qty '+fmt(c.nextQty)
-  );
+  try{
+    const q=Number($('qty').value), sl=Number($('sl').value), rec=Number($('recovery').value), precision=qtyPrecision($('qty').value);
+    let chain=[], prev=q;
+    for(let i=0;i<6;i++){
+      const c=calculateRecovery(prev,sl,rec,precision);
+      chain.push(fmt(prev)+' → '+fmt(c.recoveryQty)+' → '+fmt(c.nextQty));
+      prev=c.nextQty;
+    }
+    setProgress(100,'RECOVERY TEST PASS → '+chain.join(' | '));
+  }catch(e){alert(e.message||String(e));}
 });
 
 $('runBacktest').addEventListener('click',runBacktest);
