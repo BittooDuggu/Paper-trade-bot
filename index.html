@@ -2,76 +2,218 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Trading Bot V6 - Delta Testnet</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Trading Bot V7 — Delta Testnet Paper</title>
 <style>
-body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#f5f5f7;margin:0;color:#111827}
-main{max-width:700px;margin:auto;padding:16px}.card{background:#fff;padding:18px;border-radius:18px;margin:12px 0}
-input,button{font-size:16px;padding:12px;border-radius:10px;box-sizing:border-box}
-input{width:100%;margin:5px 0 12px;border:1px solid #ddd}button{border:0;background:#2563eb;color:#fff;font-weight:700}
-.row{display:flex;gap:10px;flex-wrap:wrap}.danger{background:#dc2626}.green{background:#16a34a}
-.muted{color:#666}.price{font-size:30px;font-weight:800}.note{background:#eef3ff;padding:12px;border-radius:12px;line-height:1.45}
+*{box-sizing:border-box}body{margin:0;background:#f5f5f7;color:#111827;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:720px;margin:auto;padding:16px}.card{background:#fff;border-radius:20px;padding:20px;margin:14px 0;box-shadow:0 3px 14px rgba(0,0,0,.06)}
+h1{font-size:28px;margin:6px 0 18px}.status{font-size:19px;font-weight:800}.dot{display:inline-block;width:20px;height:20px;border-radius:50%;background:#aaa;vertical-align:-2px;margin-right:8px}.greenDot{background:#16a34a}.redDot{background:#dc2626}
+input,button{width:100%;font-size:17px;padding:14px;border-radius:12px}input{border:1px solid #d9d9df;margin:6px 0 14px}button{border:0;background:#2563eb;color:white;font-weight:800;margin:5px 0;cursor:pointer}.danger{background:#dc2626}.green{background:#16a34a}.gray{background:#e5e7eb;color:#2563eb}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.muted{color:#6b7280}.price{font-size:34px;font-weight:900;margin:10px 0}.note{background:#eef3ff;color:#174a9c;padding:13px;border-radius:12px;line-height:1.45}.warn{background:#fff7ed;color:#9a3412;padding:13px;border-radius:12px;line-height:1.45}.journal{border-top:1px solid #eee;padding:12px 0}.small{font-size:14px}.pill{display:inline-block;padding:4px 8px;border-radius:8px;background:#eef2ff;color:#1d4ed8;font-weight:700}
+@media(max-width:520px){.grid{grid-template-columns:1fr 1fr}h1{font-size:25px}}
 </style>
 </head>
 <body><main>
-<h1>Trading Bot V6</h1>
+<h1>📈 Trading Bot V7</h1>
+
 <div class="card">
-<b>DELTA DEMO / TESTNET ONLY</b>
-<p id="connection" class="muted">Not connected</p>
-<div id="price" class="price">-</div>
-<p id="product">Product: BTCUSD</p>
+  <div class="status"><span id="dot" class="dot"></span><span id="status">STOPPED — PAPER ONLY</span></div>
+  <p id="feedStatus" class="muted">Not connected to Delta Testnet.</p>
+  <div class="price" id="price">—</div>
+  <div>Product: <b id="productLabel">BTCUSD</b></div>
+  <p id="positionLine">No open paper trade.</p>
 </div>
+
 <div class="card">
-<label>Product Symbol</label><input id="symbol" value="BTCUSD">
-<label>Starting Quantity</label><input id="qty" type="number" min="0.000000000001" step="any" value="0.01">
-<label>Target Points</label><input id="target" type="number" min="0.000000000001" step="any" value="500">
-<label>Stop Loss Points</label><input id="sl" type="number" min="0.000000000001" step="any" value="250">
-<label>Recovery Points</label><input id="recovery" type="number" min="0.000000000001" step="any" value="400">
-<div class="row">
-<button id="connect">CONNECT TESTNET PRICE</button>
-<button id="start" class="green">START TEST</button>
-<button id="stop" class="danger">STOP</button>
+  <h2>Strategy Settings</h2>
+  <label>Product Symbol</label>
+  <input id="symbol" value="BTCUSD" autocomplete="off">
+
+  <div class="grid">
+    <div><label>Starting Quantity</label><input id="qty" type="number" min="0.00000001" step="any" value="0.01"></div>
+    <div><label>Target Points</label><input id="target" type="number" min="0.00000001" step="any" value="500"></div>
+    <div><label>Stop Loss Points</label><input id="sl" type="number" min="0.00000001" step="any" value="250"></div>
+    <div><label>Recovery Points</label><input id="recovery" type="number" min="0.00000001" step="any" value="400"></div>
+  </div>
+
+  <div class="note">
+    <b>Recovery formula</b><br>
+    Actual loss = previous quantity × Stop Loss Points.<br>
+    Recovery quantity = Actual loss ÷ Recovery Points.<br>
+    Recovery quantity is rounded UP to the decimal precision of Starting Quantity.<br>
+    Next quantity = previous quantity + recovery quantity.<br>
+    After TARGET: direction flips and quantity resets to Starting Quantity.
+  </div>
+
+  <button id="connect">CONNECT / REFRESH TESTNET PRICE</button>
+  <div class="grid">
+    <button id="start" class="green">START PAPER TEST</button>
+    <button id="stop" class="danger">STOP</button>
+  </div>
 </div>
-</div>
+
 <div class="card">
-<h3>Strategy State</h3><p id="strategy">Stopped. First call will be BUY.</p>
-<div class="note"><b>Testnet only.</b> This browser page never stores API secrets and does not place authenticated orders. It verifies the public Demo/Testnet market feed first.</div>
+  <h2>Strategy State</h2>
+  <p id="strategy">Stopped. First call will be BUY.</p>
+  <p id="levels" class="muted">—</p>
+  <div class="warn small">This version is PAPER ONLY. It does not authenticate and does not place orders.</div>
 </div>
-</main>
+
+<div class="card">
+  <h2>Trade Journal</h2>
+  <div id="journal"><p class="muted">No completed paper trades.</p></div>
+  <div class="grid">
+    <button id="clear" class="gray">Clear History</button>
+    <button id="csv" class="gray">Export CSV</button>
+  </div>
+</div>
+
 <script>
-let ws=null;
-let state={running:false,dir:"BUY",qty:0.01,startQty:0.01,target:500,sl:250,recovery:400};
+let timer=null, ws=null;
+let state={
+  running:false, dir:"BUY", qty:0.01, startQty:0.01,
+  target:500, sl:250, recovery:400, entry:null, trades:[]
+};
 const $=id=>document.getElementById(id);
+
+function precisionOf(n){
+  const s=String(n);
+  if(s.includes("e-")) return Number(s.split("e-")[1]);
+  return (s.split(".")[1]||"").length;
+}
+function roundUpToStep(value, step){
+  const p=precisionOf(step);
+  const factor=10**p;
+  return Math.ceil((value*factor)-1e-12)/factor;
+}
+function fmt(n){
+  if(!Number.isFinite(n)) return "—";
+  return Number(n).toFixed(Math.min(precisionOf(Math.max(state.startQty,0.00000001)),8)).replace(/\.?0+$/,"");
+}
+function settings(){
+  const q=Number($("qty").value),t=Number($("target").value),s=Number($("sl").value),r=Number($("recovery").value);
+  return {q,t,s,r};
+}
 function render(){
+  $("dot").className="dot "+(state.running?"greenDot":"");
+  $("status").textContent=state.running?"RUNNING — PAPER ONLY":"STOPPED — PAPER ONLY";
   $("strategy").textContent=state.running
-    ? state.dir+" "+state.qty+" | Target "+state.target+" | SL "+state.sl+" | Recovery "+state.recovery
+    ? `${state.dir} ${fmt(state.qty)} | Target ${state.target} | SL ${state.sl} | Recovery ${state.recovery}`
     : "Stopped. First call will be BUY.";
+  if(state.entry!=null){
+    const tp=state.dir==="BUY"?state.entry+state.target:state.entry-state.target;
+    const sl=state.dir==="BUY"?state.entry-state.sl:state.entry+state.sl;
+    $("positionLine").innerHTML=`Open <span class="pill">${state.dir} ${fmt(state.qty)}</span> @ ${state.entry}`;
+    $("levels").textContent=`Target: ${tp} | Stop Loss: ${sl}`;
+  }else{
+    $("positionLine").textContent="No open paper trade.";
+    $("levels").textContent="—";
+  }
+  renderJournal();
+}
+function renderJournal(){
+  if(!state.trades.length){$("journal").innerHTML='<p class="muted">No completed paper trades.</p>';return;}
+  $("journal").innerHTML=state.trades.slice().reverse().map(x=>`
+    <div class="journal">
+      <b>${x.dir} ${fmt(x.qty)} — ${x.reason}</b><br>
+      Entry ${x.entry} → Exit ${x.exit} · P/L ${x.pl}<br>
+      <span class="small">Target ${x.target} · SL ${x.sl} · Recovery qty ${x.recoveryQty} · Next qty ${x.nextQty}</span><br>
+      <span class="small muted">${x.time}</span>
+    </div>`).join("");
+}
+function setFeed(msg,ok=false){$("feedStatus").textContent=msg;$("dot").className="dot "+(state.running?"greenDot":"");}
+
+async function fetchPrice(){
+  const symbol=$("symbol").value.trim().toUpperCase();
+  if(!symbol)return;
+  $("productLabel").textContent=symbol;
+  try{
+    const res=await fetch(`https://cdn-ind.testnet.deltaex.org/v2/tickers/${encodeURIComponent(symbol)}`,{cache:"no-store"});
+    if(!res.ok) throw new Error("HTTP "+res.status);
+    const data=await res.json();
+    const r=data.result||data;
+    const p=r.close ?? r.mark_price ?? r.spot_price ?? r.last_price ?? r.ltp;
+    if(p==null) throw new Error("No price in response");
+    $("price").textContent=String(p);
+    setFeed("Connected to Delta Testnet REST market feed");
+    onPrice(Number(p));
+  }catch(e){
+    setFeed("REST feed error: "+e.message+" — trying WebSocket…");
+    connectWS(symbol);
+  }
+}
+function connectWS(symbol){
+  if(ws){try{ws.close()}catch(e){}}
+  try{
+    ws=new WebSocket("wss://socket-ind-pub.testnet.deltaex.org");
+    ws.onopen=()=>{
+      setFeed("Connected to Delta Testnet WebSocket");
+      ws.send(JSON.stringify({type:"subscribe",payload:{channels:[{name:"v2/ticker",symbols:[symbol]}]}}));
+    };
+    ws.onmessage=e=>{
+      try{
+        const m=JSON.parse(e.data);
+        const r=m.result||m.payload||m;
+        const p=r.price ?? r.close ?? r.mark_price ?? r.spot_price ?? r.ltp ?? r.p;
+        if(p!=null){$("price").textContent=String(p);onPrice(Number(p));}
+      }catch(_){}
+    };
+    ws.onerror=()=>setFeed("WebSocket error — use CONNECT again");
+    ws.onclose=()=>{if(!timer)setFeed("Testnet feed disconnected");};
+  }catch(e){setFeed("Could not connect: "+e.message)}
+}
+function start(){
+  const {q,t,s,r}=settings();
+  if(!(q>0&&t>0&&s>0&&r>0)){alert("Enter valid positive settings.");return;}
+  if($("price").textContent==="—"){alert("Connect to Testnet price first.");return;}
+  state={running:true,dir:"BUY",qty:q,startQty:q,target:t,sl:s,recovery:r,entry:Number($("price").textContent),trades:[]};
+  render();
+}
+function stop(){
+  state.running=false;state.entry=null;state.dir="BUY";state.qty=state.startQty;
+  render();
+}
+function onPrice(p){
+  if(!state.running || !Number.isFinite(p) || state.entry==null)return;
+  const hitTarget=state.dir==="BUY" ? p>=state.entry+state.target : p<=state.entry-state.target;
+  const hitSL=state.dir==="BUY" ? p<=state.entry-state.sl : p>=state.entry+state.sl;
+  if(hitTarget) closeTrade(p,"TARGET");
+  else if(hitSL) closeTrade(p,"STOP LOSS");
+}
+function closeTrade(exit,reason){
+  const oldQty=state.qty, entry=state.entry;
+  const pl=(state.dir==="BUY"?exit-entry:entry-exit)*oldQty;
+  let recoveryQty=0,nextQty=state.startQty;
+  if(reason==="STOP LOSS"){
+    const actualLoss=oldQty*state.sl;
+    recoveryQty=roundUpToStep(actualLoss/state.recovery,state.startQty);
+    nextQty=oldQty+recoveryQty;
+  }
+  state.trades.push({
+    dir:state.dir,qty:oldQty,entry,exit,pl:Number(pl.toFixed(8)),
+    reason,target:state.target,sl:state.sl,recoveryQty:fmt(recoveryQty),nextQty:fmt(nextQty),
+    time:new Date().toLocaleString()
+  });
+  state.dir=state.dir==="BUY"?"SELL":"BUY";
+  state.qty=nextQty;
+  state.entry=exit;
+  render();
 }
 $("connect").onclick=()=>{
-  const symbol=$("symbol").value.trim().toUpperCase();
-  if(!symbol){alert("Enter a product symbol.");return;}
-  $("product").textContent="Product: "+symbol;
-  if(ws)ws.close();
-  ws=new WebSocket("wss://socket-ind-pub.testnet.deltaex.org");
-  ws.onopen=()=>{
-    $("connection").textContent="Connected to Delta Testnet public WebSocket";
-    ws.send(JSON.stringify({type:"subscribe",payload:{channels:[{name:"v2/ticker",symbols:[symbol]}]}}));
-  };
-  ws.onmessage=e=>{
-    try{
-      const m=JSON.parse(e.data);
-      const p=m?.price??m?.mark_price??m?.close??m?.payload?.price??m?.payload?.mark_price??m?.payload?.close;
-      if(p!=null)$("price").textContent=String(p);
-    }catch(err){}
-  };
-  ws.onclose=()=>{$("connection").textContent="Testnet feed disconnected";};
-  ws.onerror=()=>{$("connection").textContent="Testnet WebSocket error";};
+  clearInterval(timer);
+  fetchPrice();
+  timer=setInterval(fetchPrice,2500);
 };
-$("start").onclick=()=>{
-  const q=Number($("qty").value),t=Number($("target").value),s=Number($("sl").value),r=Number($("recovery").value);
-  if(!(q>0&&t>0&&s>0&&r>0)){alert("Enter valid positive settings.");return;}
-  state={running:true,dir:"BUY",qty:q,startQty:q,target:t,sl:s,recovery:r};render();
+$("start").onclick=start;
+$("stop").onclick=stop;
+$("clear").onclick=()=>{state.trades=[];render()};
+$("csv").onclick=()=>{
+  const rows=[["Direction","Quantity","Entry","Exit","P/L","Reason","Target","SL","Recovery Qty","Next Qty","Time"]];
+  state.trades.forEach(x=>rows.push([x.dir,x.qty,x.entry,x.exit,x.pl,x.reason,x.target,x.sl,x.recoveryQty,x.nextQty,x.time]));
+  const csv=rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
+  const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));a.download="paper-trade-journal.csv";a.click();
 };
-$("stop").onclick=()=>{state.running=false;state.dir="BUY";state.qty=state.startQty;render();};
+$("symbol").addEventListener("change",()=>{$("productLabel").textContent=$("symbol").value.trim().toUpperCase()});
 render();
-</script></body></html>
+</script>
+</main></body></html>
