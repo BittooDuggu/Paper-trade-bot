@@ -1,0 +1,101 @@
+<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Paper Trade Bot V3</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;margin:0;background:#f5f5f7;color:#111827}
+main{max-width:680px;margin:auto;padding:18px 14px 40px}.card{background:#fff;border-radius:16px;padding:16px;margin:12px 0;box-shadow:0 2px 10px #0001}
+h1{font-size:28px;margin:8px 0}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+label{font-size:13px;color:#666;display:block;margin-bottom:5px}
+input{width:100%;box-sizing:border-box;padding:12px;border:1px solid #ddd;border-radius:10px;font-size:16px}
+button{padding:12px 16px;border:0;border-radius:12px;font-weight:700;font-size:16px}.start{background:#16a34a;color:#fff}.stop{background:#dc2626;color:#fff}.blue{background:#2563eb;color:#fff}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.muted{color:#666}.trade{border-top:1px solid #eee;padding:10px 0}.levels{font-size:14px;color:#444;margin-top:6px}
+</style></head><body><main>
+<h1>📈 Paper Trade Bot V3</h1>
+<div class="card"><div class="row"><span id="dot">⚪</span><b id="status">STOPPED</b>
+<button id="toggle" class="start" onclick="toggle()">START</button></div>
+<p>Direction: <b id="dir">BUY</b> · Quantity: <b id="qtyView">1</b></p></div>
+
+<div class="card"><h3>Strategy Settings</h3><div class="grid">
+<div><label>Market</label><input id="market" value="NSE"></div>
+<div><label>Symbol</label><input id="symbol" value="NIFTY"></div>
+<div><label>Starting Quantity</label><input id="qty" type="number" value="1" min="0.00000001" step="any" oninput="if($(&quot;autoStep&quot;)?.checked) syncStep()"></div>
+<div><label>Quantity Step</label><input id="qtyStep" type="number" value="1" min="0.00000001" step="any" oninput="stepManual=true"></div>
+<div><label>Target Points</label><input id="target" type="number" value="500" min=".01" step="any"></div>
+<div><label>Stop Loss Points</label><input id="sl" type="number" value="250" min=".01" step="any"></div>
+<div><label>Recovery Move</label><input id="recovery" type="number" value="400" min=".01" step="any"></div>
+<div><label>Loss Divisor</label><input id="divisor" type="number" value="4" min=".01" step="any"></div>
+</div><p class="muted">Decimal quantity supported. Auto Step: 0.01→0.01, 0.1→0.1, 1→1. SL recovery quantity is calculated from actual loss and rounded UP to the selected step.</p><div class="row"><label style="display:flex;align-items:center;gap:8px;margin:0"><input id="autoStep" type="checkbox" checked style="width:auto" onchange="stepManual=!this.checked;syncStep()"> Auto Quantity Step</label></div></div>
+
+<div class="card"><h3>Paper Price</h3><input id="price" type="number" step="any" placeholder="Enter price">
+<div class="row" style="margin-top:10px"><button class="blue" onclick="openSignal()">Open Current Signal</button><button onclick="updatePrice()">Update Price / Check</button></div>
+<div id="open" class="muted">No open trade.</div></div>
+
+<div class="card"><h3>Trade Journal</h3><div id="journal" class="muted">No completed trades.</div>
+<button class="blue" onclick="exportCSV()">Export CSV</button> <button onclick="clearAll()">Clear History</button></div>
+</main><script>
+const KEY='ptb_v4';let stepManual=false;let state=JSON.parse(localStorage.getItem(KEY)||'null')||{running:false,dir:'BUY',qty:1,qtyStep:1,trades:[],open:null};
+const $=id=>document.getElementById(id),num=id=>Number($(id).value);
+function inferredStep(q){
+  q=Math.abs(Number(q));
+  if(!Number.isFinite(q)||q<=0)return 1;
+  if(q>=1)return 1;
+  const s=q.toString(), d=(s.split('.')[1]||'').length;
+  return Math.pow(10,-Math.min(d,8));
+}
+function syncStep(){
+  if(!$('autoStep') || $('autoStep').checked){
+    const s=inferredStep(num('qty'));
+    $('qtyStep').value=fmt(s);
+  }
+}
+function fmt(x){return Number(x).toFixed(12).replace(/0+$/,'').replace(/\.$/,'')||'0'}
+function ceilStep(v,s){return Math.ceil((v/s)-1e-12)*s}
+function roundStep(v,s){return Math.round((v/s)+1e-10)*s}
+function save(){localStorage.setItem(KEY,JSON.stringify(state));render()}
+function render(){
+$('status').textContent=state.running?'RUNNING — PAPER ONLY':'STOPPED';$('dot').textContent=state.running?'🟢':'⚪';
+$('toggle').textContent=state.running?'STOP':'START';$('toggle').className=state.running?'stop':'start';
+$('dir').textContent=state.dir;$('qtyView').textContent=fmt(state.qty);
+if(state.open){let t=state.open;$('open').innerHTML='<b>'+t.direction+' '+fmt(t.quantity)+' @ '+fmt(t.entry)+'</b><div class="levels">Target: '+fmt(t.targetPrice)+' | Stop Loss: '+fmt(t.stopLossPrice)+'</div>'}else $('open').textContent='No open trade.';
+$('journal').innerHTML=state.trades.length?state.trades.slice().reverse().map(t=>'<div class="trade"><b>'+t.direction+' '+fmt(t.quantity)+' — '+t.reason+'</b><br>Entry '+fmt(t.entry)+' → Exit '+fmt(t.exit)+' · P/L '+fmt(t.pnl)+' points<div class="levels">Target '+fmt(t.targetPrice)+' · SL '+fmt(t.stopLossPrice)+' · Next qty '+fmt(t.nextQuantity)+'</div><small>'+new Date(t.time).toLocaleString()+'</small></div>').join(''):'No completed trades.'
+}
+function toggle(){
+let q=Math.max(1e-8,num('qty')||1);
+if($('autoStep')?.checked) syncStep();
+let step=Math.max(1e-8,num('qtyStep')||inferredStep(q));
+if(state.running){
+  state.running=false;state.open=null;state.dir='BUY';state.qty=roundStep(q,step)
+}else{
+  state.running=true;state.open=null;state.dir='BUY';state.qty=roundStep(q,step);state.qtyStep=step
+}
+save()
+}
+function openSignal(){
+if(!state.running)return alert('Start the bot first.');if(state.open)return alert('A trade is already open.');
+let p=num('price'),target=num('target'),sl=num('sl'),rec=num('recovery'),div=num('divisor'),step=($('autoStep')?.checked?inferredStep(state.qty):num('qtyStep'));
+if(!Number.isFinite(p))return alert('Enter a valid price.');
+if(target<=0||sl<=0||rec<=0||div<=0||step<=0)return alert('Target, SL, Recovery Move, Loss Divisor and Quantity Step must be greater than 0.');
+state.qtyStep=step;state.open={direction:state.dir,quantity:state.qty,entry:p,
+targetPrice:state.dir==='BUY'?p+target:p-target,stopLossPrice:state.dir==='BUY'?p-sl:p+sl,
+recoveryMove:rec,lossDivisor:div,quantityStep:step,market:$('market').value.trim(),symbol:$('symbol').value.trim(),time:Date.now()};save()
+}
+function updatePrice(){
+if(!state.running||!state.open)return alert('No open paper trade.');let p=num('price');
+if(!Number.isFinite(p))return alert('Enter a valid price.');let t=state.open,reason=null;
+if(t.direction==='BUY'){if(p<=t.stopLossPrice)reason='STOP LOSS';else if(p>=t.targetPrice)reason='TARGET'}
+else{if(p>=t.stopLossPrice)reason='STOP LOSS';else if(p<=t.targetPrice)reason='TARGET'}
+if(!reason)return alert('No exit yet. Target: '+fmt(t.targetPrice)+' | Stop Loss: '+fmt(t.stopLossPrice));
+let points=t.direction==='BUY'?p-t.entry:t.entry-p,pnl=points*t.quantity,additional=0;
+if(reason==='STOP LOSS'){let recoveryAmount=Math.abs(pnl)/t.lossDivisor;additional=ceilStep(recoveryAmount/t.recoveryMove,t.quantityStep)}
+let next=roundStep(t.quantity+additional,t.quantityStep);
+state.trades.push({time:Date.now(),market:t.market,symbol:t.symbol,direction:t.direction,quantity:t.quantity,entry:t.entry,exit:p,targetPrice:t.targetPrice,stopLossPrice:t.stopLossPrice,reason,pnl,additionalQuantity:additional,nextQuantity:next});
+state.qty=next;state.qtyStep=t.quantityStep;state.dir=t.direction==='BUY'?'SELL':'BUY';state.open=null;save()
+}
+function exportCSV(){
+let rows=['timestamp,symbol,market,direction,quantity,entry_price,exit_price,target_price,stop_loss_price,reason,pnl,additional_quantity,next_quantity'];
+state.trades.forEach(t=>rows.push([new Date(t.time).toISOString(),t.symbol,t.market,t.direction,t.quantity,t.entry,t.exit,t.targetPrice,t.stopLossPrice,t.reason,t.pnl,t.additionalQuantity,t.nextQuantity].join(',')));
+let b=new Blob([rows.join('\n')],{type:'text/csv;charset=utf-8'}),a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='paper_trade_journal.csv';a.click()
+}
+function clearAll(){if(confirm('Delete all paper trade history?')){let s=Math.max(1e-8,num('qtyStep')||1);state={running:false,dir:'BUY',qty:roundStep(Math.max(1e-8,num('qty')||1),s),qtyStep:s,trades:[],open:null};save()}}
+syncStep();render();
+</script></body></html>
