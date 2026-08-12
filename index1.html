@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#2563eb">
-<title>Trading Bot V10 — Backtest</title>
+<title>Trading Bot V11 — Backtest</title>
 <style>
 *{box-sizing:border-box}
 body{margin:0;background:#f4f5f7;color:#101828;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
@@ -32,10 +32,11 @@ button.green{background:#16a34a} button.red{background:#dc2626} button.gray{back
 .hidden{display:none}
 @media(max-width:520px){.grid{gap:9px}.title{font-size:27px}.card{padding:16px}.statgrid{grid-template-columns:1fr 1fr}}
 </style>
+<meta name="version" content="V11-RECOVERY-FINAL">
 </head>
 <body>
 <main class="wrap">
-<div class="title">📈 Trading Bot V10</div>
+<div class="title">📈 Trading Bot V11</div>
 
 <div class="card">
   <h2>Strategy Settings</h2>
@@ -87,7 +88,7 @@ button.green{background:#16a34a} button.red{background:#dc2626} button.gray{back
     For a candle where both TARGET and STOP LOSS are touched, exact intrabar order cannot be known from OHLC alone. The backtester uses the selected <b>both-hit rule</b>. A new call always starts from the next available candle after an exit.
   </div>
   <div class="row" style="margin-top:14px">
-    <button id="runBacktest" class="green">RUN BACKTEST</button>
+    <button id="formulaTest" type="button" class="blue">TEST RECOVERY</button> <button id="runBacktest" class="green">RUN BACKTEST</button>
     <button id="stopBacktest" class="red hidden">STOP TEST</button>
     <button id="exportBacktest" class="gray hidden">EXPORT CSV</button>
   </div>
@@ -156,12 +157,25 @@ function roundUpQty(q,precision){
   const units=Math.ceil((n/unit)-1e-9);
   return roundQty(units*unit,precision);
 }
-function calculateRecovery(previousQty,slPoints,recoveryPoints,precision){
-  const actualLoss=Number(previousQty)*Number(slPoints);
-  const rawRecovery=actualLoss/Number(recoveryPoints);
-  const recoveryQty=roundUpQty(rawRecovery,precision);
-  const nextQty=roundQty(Number(previousQty)+recoveryQty,precision);
-  return {actualLoss,rawRecovery,recoveryQty,nextQty};
+function calculateRecovery(previousQty, slPoints, recoveryPoints, precision){
+  const previous = Number(previousQty);
+  const sl = Number(slPoints);
+  const recoveryMove = Number(recoveryPoints);
+
+  // EXACT STRATEGY RULE:
+  // actual loss = previous quantity × SL points
+  // recovery quantity = actual loss ÷ recovery points
+  // round UP to Starting Quantity precision
+  // next quantity = previous quantity + recovery quantity
+  const actualLoss = previous * sl;
+  const rawRecoveryQty = actualLoss / recoveryMove;
+
+  const unit = Math.pow(10, -precision);
+  const recoveryUnits = Math.max(1, Math.ceil((rawRecoveryQty / unit) - 1e-12));
+  const recoveryQty = Number((recoveryUnits * unit).toFixed(precision));
+  const nextQty = Number((previous + recoveryQty).toFixed(precision));
+
+  return {actualLoss, rawRecoveryQty, recoveryQty, nextQty};
 }
 function epochSeconds(date,time){
   return Math.floor(new Date(date+'T'+time+':00').getTime()/1000);
@@ -283,12 +297,14 @@ function runEngine(candles,cfg){
     let recoveryQty=0;
     let nextQty;
     if(exit.reason==='STOP LOSS'){
-      // Recovery is calculated from the quantity that actually lost.
-      // Example: 0.01 × 250 = 2.5 loss; 2.5 ÷ 400 = 0.00625;
-      // rounded UP to 0.01 => next quantity = 0.01 + 0.01 = 0.02.
-      const calc=calculateRecovery(trade.quantity,cfg.sl,cfg.recovery,cfg.precision);
-      recoveryQty=calc.recoveryQty;
-      nextQty=calc.nextQty;
+      const calc = calculateRecovery(
+        trade.quantity,
+        cfg.sl,
+        cfg.recovery,
+        cfg.precision
+      );
+      recoveryQty = calc.recoveryQty;
+      nextQty = calc.nextQty;
     }else{
       // TARGET: reset BEFORE creating the next call.
       nextQty=cfg.q;
@@ -354,7 +370,7 @@ function renderJournal(){
     '<div class="trade"><b>#'+t.no+' '+t.direction+' '+fmt(t.quantity)+' — '+t.reason+'</b><br>'+
     'Entry '+fmt(t.entry)+' → Exit '+fmt(t.exit)+' · P/L '+fmt(t.pnl)+' points'+
     '<div class="muted">Target '+fmt(t.target)+' · SL '+fmt(t.sl)+
-    ' · Recovery qty '+fmt(t.recoveryQty)+' · <b>Next qty '+fmt(t.nextQty)+'</b>'+
+    ' · Loss '+fmt(t.actualLoss)+' · Loss ÷ Recovery '+fmt(t.rawRecovery)+' · <b>Recovery qty '+fmt(t.recoveryQty)+' · Next qty '+fmt(t.nextQty)+'</b>'+
     (t.reason==='STOP LOSS'?' · Loss '+fmt(t.actualLoss)+' ÷ Recovery '+fmt(t.rawRecovery):' · Quantity reset to Starting Quantity')+
     (t.bothHit?' · Both levels touched':'')+'</div>'+
     '<small>'+new Date(t.time*1000).toLocaleString()+' → '+new Date(t.exitTime*1000).toLocaleString()+'</small></div>'
@@ -396,6 +412,21 @@ async function runBacktest(){
     $('runBacktest').classList.remove('hidden'); $('stopBacktest').classList.add('hidden');
   }
 }
+
+$('formulaTest').addEventListener('click',()=>{
+  const q=Number($('qty').value);
+  const sl=Number($('sl').value);
+  const rec=Number($('recovery').value);
+  const precision=qtyPrecision($('qty').value);
+  const c=calculateRecovery(q,sl,rec,precision);
+  setProgress(100,
+    'TEST RESULT → Loss '+fmt(c.actualLoss)+
+    ' | Loss ÷ Recovery '+fmt(c.rawRecoveryQty)+
+    ' | Recovery Qty '+fmt(c.recoveryQty)+
+    ' | NEXT Qty '+fmt(c.nextQty)
+  );
+});
+
 $('runBacktest').addEventListener('click',runBacktest);
 $('stopBacktest').addEventListener('click',()=>{if(abortController) abortController.abort();});
 $('exportBacktest').addEventListener('click',exportCSV);
